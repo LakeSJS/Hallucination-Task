@@ -136,9 +136,7 @@
 /*****************************************************
                   Arduino Libraries
  *****************************************************/ 
-#include <Volume.h>             // Volume control library
-#include <Adafruit_DS3502.h>    // digital potentiometer control library
-#include <vector.h>
+// none needed right now until we do volume control =)
 /*****************************************************
 	              Global Variables
 *****************************************************/
