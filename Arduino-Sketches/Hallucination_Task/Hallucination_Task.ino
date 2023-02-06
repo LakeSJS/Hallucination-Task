@@ -133,10 +133,14 @@
 		 - Transitions: evaluated on each loop and determines what the next state should be.
 *********************************************************************/
 
-
-
 /*****************************************************
-	Global Variables
+                  Arduino Libraries
+ *****************************************************/ 
+#include <Volume.h>             // Volume control library
+#include <Adafruit_DS3502.h>    // digital potentiometer control library
+#include <vector.h>
+/*****************************************************
+	              Global Variables
 *****************************************************/
 
 /*****************************************************
@@ -148,10 +152,10 @@ Available pins for 3.4: 4-11 20-23
 
 // PWM OUT --- n.b! 2 tones can't play at the same time!
 #define PIN_SPEAKER        47   	// Speaker Pin            (DUE =  2)  (MEGA =  8)  (UNO =  9) (TEENSY = 5)	(TEENSY3.4 5)
-#define PIN_NOISE          46   	// Noise Pin              (DUE =  3)  (MEGA =  9)  (UNO = 10) (TEENSY = 6)	(TEENSY3.4 6)
+#define PIN_NOISE          22   	// Noise Pin              (DUE =  3)  (MEGA =  9)  (UNO = 10) (TEENSY = 6)	(TEENSY3.4 6)
 #define PIN_LEFT_REWARD    43   // Left spout solenoid
 #define PIN_RIGHT_REWARD   42   // Right spout solenoid
-#define PIN_LED_CUE        39   // Cue LED
+#define PIN_LED_CUE        39   // Cue LED - Tells subject it is time to respond
 #define PIN_HOUSE_LAMP     38   // House light
 // Digital IN
 #define PIN_LEFT_LICK      53    // Left lick sensor
@@ -306,6 +310,7 @@ Parameters that can be updated by HOST
 enum ParamID
 {
     _DEBUG,                         // (Private) 1 to enable debug messages from HOST. Default 0.
+    CALIBRATION,                    // 1 to enable calibration mode. Default 0.
     PERCENT_S2,					    // percent of trials where S2 should be present
     S2_SPOUT,                       // 1 if the Left side is S2 spout, 2 if right side is S2 spout
     NOISE_SPOUT,                    // 1 if the Left side is noise spout, 2 if right side is noise spout
@@ -316,6 +321,7 @@ enum ParamID
     ITI_DURATION_MS,                // How long is ITI state
     PENALTY_DURATION_MS,            // How long is the penalty state
     TIME_NOISE_START,				// how long after entering NOISE_TRIAL or CUE_TRIAL white noise should start playing in ms
+    MOVING_AVG_WINDOW,              // How many trials to use for moving average
     _NUM_PARAMS                     // (Private) Used to count how many parameters there are so we can initialize the param array with the correct size. Insert additional parameters before this.
 }; //**** BE SURE TO ADD NEW PARAMS TO THE NAMES LIST BELOW!*****//
 
@@ -324,6 +330,7 @@ enum ParamID
 static const char *_paramNames[] =
         {
                 "_DEBUG",
+                "CALIBRATION",
                 "PERCENT_S2",
                 "S2_SPOUT",
                 "NOISE_SPOUT",
@@ -333,13 +340,15 @@ static const char *_paramNames[] =
                 "RESPONSE_WINDOW_MS",
                 "ITI_DURATION_MS",
                 "PENALTY_DURATION_MS",
-                "TIME_NOISE_START"
+                "TIME_NOISE_START",
+                "MOVING_AVG_WINDOW"
         }; //**** BE SURE TO INIT NEW PARAM VALUES BELOW!*****//
 
 // Initialize parameters
 int _params[_NUM_PARAMS] =
         {
                 0,                              // _DEBUG
+                0,                              // CALIBRATION
                 50,								 // PERCENT_S2
                 1,                              // S2_SPOUT
                 2,                              // NOISE_SPOUT
@@ -348,7 +357,8 @@ int _params[_NUM_PARAMS] =
                 250,                            // S2_DURATION_MS
                 3000,                           // RESPONSE_WINDOW_MS
                 5000,                           // ITI_DURATION_MS
-                50 								// TIME_NOISE_START
+                50, 						    // TIME_NOISE_START
+                6                              // MOVING_AVG_WINDOW
         };
 
 /*****************************************************
@@ -361,7 +371,6 @@ static State _prevState              = _INIT;    // Remembers the previous _stat
 static char _command                 = ' ';      // Command char received from host, resets on each loop
 static int  _arguments[2]     		 = {0};      // Two integers received from host , resets on each loop ** changed from int to this so that we can collect negative inputs
 static long _resultCode              = -1;       // Result code number. -1 if there is no result.
-
 
 static long _eventMarkerTimer        = 0;
 static long _trialTimer              = 0;
@@ -406,6 +415,13 @@ static long _percent_correct_reject  = 0;        // Tracks percent of trials tha
 static long _percent_false_alarm     = 0;        // Tracks percent of trials that the animal had a false alarm
 static long _percent_no_response     = 0;        // Tracks percent of trials that the animal did not respond in time
 
+// moving average trackers for animal performance
+static long _recentHitRate           = 0;        // Tracks the hit rate over the last 6 trials
+static long _recentMissRate          = 0;        // Tracks the miss rate over the last 6 trials
+static long _recentCorrectRejectRate = 0;        // Tracks the correct reject rate over the last 6 trials
+static long _recentFalseAlarmRate    = 0;        // Tracks the false alarm rate over the last 6 trials
+static long _recentNoResponseRate    = 0;        // Tracks the no response rate over the last 6 trials
+static string _recentOutcomes[_PARAMS[MOVING_AVG_WINDOW]]; // Tracks the outcomes of the last 6 trials
 
 static bool _leftLick         = false;    // True when left lick detected, False when no lick
 static bool _rightLick        = false;    // True when right lick detected, False when no lick
@@ -419,10 +435,11 @@ static long _exp_timer               = 0;        // Experiment timer, reset to s
 static long _stimulus_timer          = 0;        // Tracks time cue has been displayed for
 static long _reward_timer            = 0;        // Tracks time in reward state
 
+// global variables for potentiometer control
+Adafruit_DS3502 potentiometer = Adafruit_DS3502(); // Create a DS3502 digital potentiometer object
 static long _dice_roll = 0; // random number generator for determining whether S2 is present or not
 
 static char versionCode = "1.0.0";
-
 
 
 /*****************************************************
@@ -449,6 +466,8 @@ void setup()
     //------------------------Serial Comms--------------------//
     Serial.begin(115200);                       // Set up USB communication at 115200 baud
 
+    //---------------------- Potentiometer --------------------//
+    potentiometer.begin(); // Initialize the potentiometer
 } // End Initialization Loop -----------------------------------------------------------------------------------------------------
 
 
@@ -676,6 +695,10 @@ void init_trial() {
         } else {
             _is_S2 = false;
         }
+        // if in calibration mode, force trial to be S2
+        if (_params[CALIBRATION_MODE]) {
+            _is_S2 = true;
+        }
         // if trial will be S2, choose when S2 will play
         if (_is_S2) {
             _time_S2_start = random(1,_params[WHITE_NOISE_DURATION_MS] - _params[S2_DURATION_MS]); // select when s2 will play by generating random number between 1ms and latest possible that still overlaps with white noise
@@ -788,6 +811,7 @@ void cue_trial() {
     }
     if( signedMillis() > _time_S2_start && signedMillis <= _time_S2_start + _params[S2_DURATION_MS]) { // if it is within time window to play cue
         playSound(TONE_S2); // hopefully this doesn't accidentally extend the tone sound by executing the tone function all the way through the last possible time, this needs to be tested
+        
     }
 
     // define condition for leaving this state
@@ -798,7 +822,7 @@ void cue_trial() {
         return;                                           // Exit Fx
     }
 
-    _state = CUE_TRIAL;                            // No Command --> Cycle back to INIT_TRIAL
+    _state = CUE_TRIAL;                            // No Command --> Cycle back to CUE_TRIAL
 } // End CUE_TRIAL STATE ------------------------------------------------------------------------------------------------------------------------------------------
 
 
@@ -902,8 +926,7 @@ void hit() {
         if (_params[_DEBUG]) {sendMessage("mouse hit.)");}
 
         setCueLED(false); // turn off cue LED
-        _num_hits++; // increment number of hits
-        _percent_hit = _num_hits / _num_trials; // calculate hit rate
+
         // Do the initial business of the state -- something you only want to do once when you enter
         giveReward(_params[S2_SPOUT]); // dispense juice on the tone spout
         // send event with timestamp to host that reward was given on tone spout, accounting for if tone spout is the right or left
@@ -941,8 +964,7 @@ void miss() {
         if (_params[_DEBUG]) {sendMessage("mouse missed.)");}
 
         setCueLED(false); // turn off cue LED
-        _num_misses++; // increment number of misses
-        _percent_miss = _num_misses / _num_trials; // calculate miss rate
+        
         // Do the initial business of the state -- something you only want to do once when you enter
     }
     /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -971,9 +993,7 @@ void false_alarm() {
         if (_params[_DEBUG]) {sendMessage("mouse false alarmed.)");}
 
         setCueLED(false); // turn off cue LED
-        _num_false_alarms++; // increment number of false alarms
-        _percent_false_alarm = _num_false_alarms / _num_trials; // calculate false alarm rate
-        _percent_incorrect = (_num_false_alarms + _num_misses) / _num_trials; // calculate percent incorrect
+        
         // Do the initial business of the state -- something you only want to do once when you enter
     }
     /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1002,8 +1022,7 @@ void correct_reject() {
         if (_params[_DEBUG]) {sendMessage("mouse correctly rejected.)");}
 
         setCueLED(false); // turn off cue LED
-        _num_correct_rejects++; // increment number of correct rejects
-        _percent_correct_reject = _num_correct_rejects / _num_trials; // calculate correct reject rate
+        
         // Do the initial business of the state -- something you only want to do once when you enter
         giveReward(_params[NOISE_SPOUT]); // dispense juice on the noise spout
         sendMessage("reward dispensed on noise spout"); // send message to host
@@ -1036,8 +1055,7 @@ void no_response() {
         setCueLED(false); // turn off cue LED
         setHouseLamp(false); // turn off house lamp
 
-        _num_no_responses++; // increment number of no responses
-        _percent_no_response = _num_no_responses / _num_trials; // calculate no response rate
+        
         // Do the initial business of the state -- something you only want to do once when you enter
     }
     /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1174,7 +1192,118 @@ void no_response() {
         // go through what should happen if the mouse licks in each state
         
     } // end checkLick---------------------------------------------------------------------------------------------------------------------
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   Update recent outcomes and calculate performance
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
+    void updatePerformance() {
 
+        // shift recent outcomes array to the left
+        for (int i = 0; i < _params[MOVING_AVG_WINDOW] - 1; i++) {
+            _recentOutcomes[i] = _recentOutcomes[i + 1];
+        }
+        _recentOutcomes[_params[MOVING_AVG_WINDOW] - 1] = _state; // add current state to end of array
+
+        // calculate what % of _recentOutcomes are hits
+        int numHits = 0;
+        for (int i = 0; i < _params[MOVING_AVG_WINDOW]; i++) {
+            if (_recentOutcomes[i] == HIT) {
+                numHits++;
+            }
+        }
+        _recentHitRate = numHits / _params[MOVING_AVG_WINDOW];
+
+        // calculate what % of _recentOutcomes are misses
+        int numMisses = 0;
+        for (int i = 0; i < _params[MOVING_AVG_WINDOW]; i++) {
+            if (_recentOutcomes[i] == MISS) {
+                numMisses++;
+            }
+        }
+        _recentMissRate = numMisses / _params[MOVING_AVG_WINDOW];
+
+        // calculate what % of _recentOutcomes are false alarms
+        int numFalseAlarms = 0;
+        for (int i = 0; i < _params[MOVING_AVG_WINDOW]; i++) {
+            if (_recentOutcomes[i] == FALSE_ALARM) {
+                numFalseAlarms++;
+            }
+        }
+        _recentFalseAlarmRate = numFalseAlarms / _params[MOVING_AVG_WINDOW];
+
+        // calculate what % of _recentOutcomes are correct rejects
+        int numCorrectRejects = 0;
+        for (int i = 0; i < _params[MOVING_AVG_WINDOW]; i++) {
+            if (_recentOutcomes[i] == CORRECT_REJECT) {
+                numCorrectRejects++;
+            }
+        }
+        _recentCorrectRejectRate = numCorrectRejects / _params[MOVING_AVG_WINDOW];
+
+        // calculate what % of _recentOutcomes are no responses
+        int numNoResponses = 0;
+        for (int i = 0; i < _params[MOVING_AVG_WINDOW]; i++) {
+            if (_recentOutcomes[i] == NO_RESPONSE) {
+                numNoResponses++;
+            }
+        }
+        _recentNoResponseRate = numNoResponses / _params[MOVING_AVG_WINDOW];
+
+
+        // use _state variable to update global performance trackers
+        _num_trials++; // increment number of trials
+        if _state == HIT { // animal licked tone spout when tone was played
+            _num_hits++;
+            _num_correct++;
+            if _PARAMS[S2_SPOUT] == 1 { // if tone spout is on the left
+                _num_left++; // mark that the animal licked the tone spout (left)
+            }
+            else if _PARAMS[S2_SPOUT] == 2 { // if tone spout is on the right
+                _num_right++; // mark that the animal licked the tone spout (right)
+            }
+        }
+        else if _state == MISS { // animal licked noise spout when tone was played
+            _num_misses++;
+            _num_incorrect++;
+            if _PARAMS[S2_SPOUT] == 1 { // if tone spout is on the left
+                _num_right++; // mark that the animal licked the noise spout (right)
+            }
+            else if _PARAMS[S2_SPOUT] == 2 { // if tone spout is on the right
+                _num_left++; // mark that the animal licked the noise spout (left)
+            }
+        }
+        else if _state == FALSE_ALARM { // animal licked tone spout when noise was played
+            _num_false_alarms++;
+            _num_incorrect++; 
+            if _PARAMS[S2_SPOUT] == 1 { // if tone spout is on the left
+                _num_left++; // mark that the animal licked the tone spout (left)
+            }
+            else if _PARAMS[S2_SPOUT] == 2 { // if tone spout is on the right
+                _num_right++; // mark that the animal licked the tone spout (right)
+            }
+        }
+        else if _state == CORRECT_REJECT { // animal licked noise spout when noise was played
+            _num_correct_rejects++
+            _num_correct++;
+            if _PARAMS[S2_SPOUT] == 1 { // if tone spout is on the left
+                _num_right++; // mark that the animal licked the noise spout (right)
+            }
+            else if _PARAMS[S2_SPOUT] == 2 { // if tone spout is on the right
+                _num_left++; // mark that the animal licked the noise spout (left)
+            }
+        }
+        // calculate performance percentages
+        _percent_left = 100 * _num_left / _num_trials;
+        _percent_right = 100 * _num_right / _num_trials;
+        _percent_correct = 100 * _num_correct / _num_trials;
+        _percent_incorrect = 100 * _num_incorrect / _num_trials;
+        _percent_hit = 100 * _num_hits / _num_trials;
+        _percent_miss = 100 * _num_misses / _num_trials;
+        _percent_correct_reject = 100 * _num_correct_rejects / _num_trials;
+        _percent_false_alarm = 100 * _num_false_alarms / _num_trials;
+        _percent_no_response = 100 * _num_no_responses / _num_trials;
+
+
+    }
 
 
 
@@ -1238,8 +1367,9 @@ void no_response() {
     void playSound(SoundEventFrequencyEnum soundEventFrequency) {
 
         if (soundEventFrequency == TONE_S2) {          // MOUSE: Cue Tone
-            noTone(PIN_SPEAKER);                              // Turn off current sound (if any)
-            tone(PIN_SPEAKER, soundEventFrequency, _params[S2_DURATION_MS]); // Play Cue Tone (default 200 ms)
+            digitalWrite(PIN_SPEAKER, HIGH); // turn on led standin for speaker
+            delay(_params[S2_DURATION_MS]); // wait for duration of S2
+            digitalWrite(PIN_SPEAKER, LOW); // turn off led standin for speaker
             return;                                           // Exit Fx
         }
 
