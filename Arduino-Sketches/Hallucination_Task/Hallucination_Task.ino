@@ -136,7 +136,7 @@
 /*****************************************************
                   Arduino Libraries
  *****************************************************/ 
-// none needed right now until we do volume control =)
+
 /*****************************************************
 	              Global Variables
 *****************************************************/
@@ -149,7 +149,7 @@ Available pins for 3.4: 4-11 20-23
 
 
 // PWM OUT --- n.b! 2 tones can't play at the same time!
-#define PIN_SPEAKER        47   	// Speaker Pin            (DUE =  2)  (MEGA =  8)  (UNO =  9) (TEENSY = 5)	(TEENSY3.4 5)
+#define PIN_SPEAKER        8   	// Speaker Pin            (DUE =  2)  (MEGA =  8)  (UNO =  9) (TEENSY = 5)	(TEENSY3.4 5)
 #define PIN_NOISE          22   	// Noise Pin              (DUE =  3)  (MEGA =  9)  (UNO = 10) (TEENSY = 6)	(TEENSY3.4 6)
 #define PIN_LEFT_REWARD    43   // Left spout solenoid
 #define PIN_RIGHT_REWARD   42   // Right spout solenoid
@@ -298,7 +298,7 @@ enum SoundEventFrequencyEnum
 {
     TONE_REWARD  = 17000,            // What is this?
     TONE_FAIL    = 10000,            // What is this?
-    TONE_S2      = 15000             // What is this?
+    TONE_S2      = 2000             // What is this?
 };
 
 /*****************************************************
@@ -351,10 +351,11 @@ int _params[_NUM_PARAMS] =
                 1,                              // S2_SPOUT
                 2,                              // NOISE_SPOUT
                 40,                             // REWARD_DURATION_MS
-                3000,							 // WHITE_NOISE_DURATION_MS
+                3000,							// WHITE_NOISE_DURATION_MS
                 250,                            // S2_DURATION_MS
                 3000,                           // RESPONSE_WINDOW_MS
                 5000,                           // ITI_DURATION_MS
+                5000,                           // PENALTY_DURATION_MS
                 50, 						    // TIME_NOISE_START
                 6                              // MOVING_AVG_WINDOW
         };
@@ -419,7 +420,7 @@ static long _recentMissRate          = 0;        // Tracks the miss rate over th
 static long _recentCorrectRejectRate = 0;        // Tracks the correct reject rate over the last 6 trials
 static long _recentFalseAlarmRate    = 0;        // Tracks the false alarm rate over the last 6 trials
 static long _recentNoResponseRate    = 0;        // Tracks the no response rate over the last 6 trials
-static string _recentOutcomes[_PARAMS[MOVING_AVG_WINDOW]]; // Tracks the outcomes of the last 6 trials
+static State _recentOutcomes[6]; // Tracks the outcomes of the last 6 trials
 
 static bool _leftLick         = false;    // True when left lick detected, False when no lick
 static bool _rightLick        = false;    // True when right lick detected, False when no lick
@@ -433,8 +434,6 @@ static long _exp_timer               = 0;        // Experiment timer, reset to s
 static long _stimulus_timer          = 0;        // Tracks time cue has been displayed for
 static long _reward_timer            = 0;        // Tracks time in reward state
 
-// global variables for potentiometer control
-Adafruit_DS3502 potentiometer = Adafruit_DS3502(); // Create a DS3502 digital potentiometer object
 static long _dice_roll = 0; // random number generator for determining whether S2 is present or not
 
 static char versionCode = "1.0.0";
@@ -465,7 +464,7 @@ void setup()
     Serial.begin(115200);                       // Set up USB communication at 115200 baud
 
     //---------------------- Potentiometer --------------------//
-    potentiometer.begin(); // Initialize the potentiometer
+    
 } // End Initialization Loop -----------------------------------------------------------------------------------------------------
 
 
@@ -694,7 +693,7 @@ void init_trial() {
             _is_S2 = false;
         }
         // if in calibration mode, force trial to be S2
-        if (_params[CALIBRATION_MODE]) {
+        if (_params[CALIBRATION]) {
             _is_S2 = true;
         }
         // if trial will be S2, choose when S2 will play
@@ -758,15 +757,19 @@ void noise_trial() {
     checkLick(); // YOU WANT A LICK R and L function
 
     // check if time has reached noise start, if so play noise until end of state time out
-    bool isWithinWindow = (signedMillis() - _timer_noise_trial >= _params[TIME_NOISE_START]);		// boolean to denote whether it is time to play the noise
-    if (isWithinWindow) {
+    long time_elapsed = signedMillis() - _timer_noise_trial;
+    bool isWithinNoiseWindow = (time_elapsed >= _params[TIME_NOISE_START]) && (time_elapsed <= (_params[TIME_NOISE_START] + _params[WHITE_NOISE_DURATION_MS]));		// boolean to denote whether it is time to play the noise
+    if (isWithinNoiseWindow) {
         setNOISE(true); // play noise
+    }
+    else {
+        setNOISE(false); // turn off noise
     }
 
     // define condition for leaving this state
-    if (signedMillis() - _timer_noise_trial >= _stateDurationsMS[_state]) {// noise_trial time allotted has elapsed -> response window
+    if (time_elapsed >= (_params[TIME_NOISE_START] + _params[WHITE_NOISE_DURATION_MS])) {// noise_trial time allotted has elapsed -> response window
         if (_params[_DEBUG]) {sendMessage("white noise trial successfully completed.");}
-        setNOISE(false);								  // turn off white noise
+        setNOISE(false);								  // turn off white noise if still playing
         _state = RESPONSE_WINDOW;                         // Move to RESPONSE_WINDOW state
         return;                                           // Exit Fx
     }
@@ -788,8 +791,7 @@ void cue_trial() {
         // Send event marker (house_lamp_off) to HOST with timestamp
         sendMessage("&" + String(EVENT_CUE_TRIAL) + " " + String(signedMillis() - _exp_timer));
         _timer_cue_trial = signedMillis();                     // mark time when state was entered
-        if (_params[_DEBUG]) {sendMessage("Trial Started.)");}
-
+        if (_params[_DEBUG]) {sendMessage("Trial Started.");}
         // Do the initial business of the state -- something you only want to do once when you enter
     }
 
@@ -803,18 +805,26 @@ void cue_trial() {
     checkLick(); // YOU WANT A LICK R and L function
 
     // check if time has reached noise start, if so play noise until end of state time out
-    bool isWithinWindow = (signedMillis() - _timer_noise_trial >= _params[TIME_NOISE_START]);		// boolean to denote whether it is time to play the noise
-    if (isWithinWindow) {
+    long time_elapsed = signedMillis() - _timer_cue_trial;
+    bool isWithinNoiseWindow = (time_elapsed >= _params[TIME_NOISE_START]) && (time_elapsed <= (_params[TIME_NOISE_START] + _params[WHITE_NOISE_DURATION_MS]));		// boolean to denote whether it is time to play the noise
+    bool isWithinS2Window = abs(time_elapsed - _time_S2_start) <= 5;		// boolean to denote whether it is time to play S2
+
+    if (isWithinNoiseWindow) {
         setNOISE(true); // play noise
     }
-    if( signedMillis() > _time_S2_start && signedMillis <= _time_S2_start + _params[S2_DURATION_MS]) { // if it is within time window to play cue
+    else {
+        setNOISE(false); // turn off noise
+    }
+    
+    if(isWithinS2Window) { // if it is within time window to play cue
         playSound(TONE_S2); // hopefully this doesn't accidentally extend the tone sound by executing the tone function all the way through the last possible time, this needs to be tested
-        
+        // if debug send message saying tone played
+        if (_params[_DEBUG]) {sendMessage("S2 tone played.");}
     }
 
     // define condition for leaving this state
-    if (signedMillis() - _timer_cue_trial >= _stateDurationsMS[_state]) {// cue_trial time allotted has elapsed -> response window
-        if (_params[_DEBUG]) {sendMessage("white noise trial successfully completed.");}
+    if (time_elapsed >= (_params[TIME_NOISE_START] + _params[WHITE_NOISE_DURATION_MS])) { // cue_trial time allotted has elapsed -> response window
+        if (_params[_DEBUG]) {sendMessage("cue trial successfully completed.");}
         setNOISE(false);								  // turn off white noise
         _state = RESPONSE_WINDOW;                         // Move to RESPONSE_WINDOW state
         return;                                           // Exit Fx
@@ -1249,43 +1259,43 @@ void no_response() {
 
         // use _state variable to update global performance trackers
         _num_trials++; // increment number of trials
-        if _state == HIT { // animal licked tone spout when tone was played
+        if (_state == HIT) { // animal licked tone spout when tone was played
             _num_hits++;
             _num_correct++;
-            if _PARAMS[S2_SPOUT] == 1 { // if tone spout is on the left
+            if (_params[S2_SPOUT] == 1) { // if tone spout is on the left
                 _num_left++; // mark that the animal licked the tone spout (left)
             }
-            else if _PARAMS[S2_SPOUT] == 2 { // if tone spout is on the right
+            else if (_params[S2_SPOUT] == 2) { // if tone spout is on the right
                 _num_right++; // mark that the animal licked the tone spout (right)
             }
         }
-        else if _state == MISS { // animal licked noise spout when tone was played
+        else if (_state == MISS) { // animal licked noise spout when tone was played
             _num_misses++;
             _num_incorrect++;
-            if _PARAMS[S2_SPOUT] == 1 { // if tone spout is on the left
+            if (_params[S2_SPOUT] == 1) { // if tone spout is on the left
                 _num_right++; // mark that the animal licked the noise spout (right)
             }
-            else if _PARAMS[S2_SPOUT] == 2 { // if tone spout is on the right
+            else if (_params[S2_SPOUT] == 2) { // if tone spout is on the right
                 _num_left++; // mark that the animal licked the noise spout (left)
             }
         }
-        else if _state == FALSE_ALARM { // animal licked tone spout when noise was played
+        else if (_state == FALSE_ALARM) { // animal licked tone spout when noise was played
             _num_false_alarms++;
             _num_incorrect++; 
-            if _PARAMS[S2_SPOUT] == 1 { // if tone spout is on the left
+            if (_params[S2_SPOUT] == 1) { // if tone spout is on the left
                 _num_left++; // mark that the animal licked the tone spout (left)
             }
-            else if _PARAMS[S2_SPOUT] == 2 { // if tone spout is on the right
+            else if (_params[S2_SPOUT] == 2) { // if tone spout is on the right
                 _num_right++; // mark that the animal licked the tone spout (right)
             }
         }
-        else if _state == CORRECT_REJECT { // animal licked noise spout when noise was played
-            _num_correct_rejects++
+        else if (_state == CORRECT_REJECT) { // animal licked noise spout when noise was played
+            _num_correct_rejects++;
             _num_correct++;
-            if _PARAMS[S2_SPOUT] == 1 { // if tone spout is on the left
+            if (_params[S2_SPOUT] == 1) { // if tone spout is on the left
                 _num_right++; // mark that the animal licked the noise spout (right)
             }
-            else if _PARAMS[S2_SPOUT] == 2 { // if tone spout is on the right
+            else if (_params[S2_SPOUT] == 2) { // if tone spout is on the right
                 _num_left++; // mark that the animal licked the noise spout (left)
             }
         }
@@ -1365,14 +1375,11 @@ void no_response() {
     void playSound(SoundEventFrequencyEnum soundEventFrequency) {
 
         if (soundEventFrequency == TONE_S2) {          // MOUSE: Cue Tone
-            digitalWrite(PIN_SPEAKER, HIGH); // turn on led standin for speaker
-            delay(_params[S2_DURATION_MS]); // wait for duration of S2
-            digitalWrite(PIN_SPEAKER, LOW); // turn off led standin for speaker
+            tone(PIN_SPEAKER, TONE_S2, _params[S2_DURATION_MS]); // play tone at frequency of S2 for duration of S2
             return;                                           // Exit Fx
         }
 
     } // end Play Sound---------------------------------------------------------------------------------------------------------------------
-
 
 /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 	PLAY NOISE (turn noise on or off)
@@ -1384,7 +1391,7 @@ void no_response() {
         else {
             digitalWrite(PIN_NOISE, LOW);
         }
-    } // end Set Trigger LED---------------------------------------------------------------------------------------------------------------------
+    } // end Play Noise---------------------------------------------------------------------------------------------------------------------
 
 
 
