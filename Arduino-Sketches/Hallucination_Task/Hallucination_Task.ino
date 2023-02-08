@@ -752,7 +752,6 @@ void noise_trial() {
         sendMessage("&" + String(EVENT_NOISE_TRIAL) + " " + String(signedMillis() - _exp_timer));
         _timer_noise_trial = signedMillis();                     // mark time when state was entered
         if (_params[_DEBUG]) {sendMessage("Noise Trial Started.");}
-        _playTone = false; // ensure tone won't play
         // Do the initial business of the state -- something you only want to do once when you enter
 
 
