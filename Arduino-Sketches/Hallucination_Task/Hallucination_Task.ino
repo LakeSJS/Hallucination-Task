@@ -149,15 +149,15 @@ Available pins for 3.4: 4-11 20-23
 
 
 // PWM OUT --- n.b! 2 tones can't play at the same time!
-#define PIN_SPEAKER        8   	// Speaker Pin            (DUE =  2)  (MEGA =  8)  (UNO =  9) (TEENSY = 5)	(TEENSY3.4 5)
-#define PIN_NOISE          22   	// Noise Pin              (DUE =  3)  (MEGA =  9)  (UNO = 10) (TEENSY = 6)	(TEENSY3.4 6)
-#define PIN_LEFT_REWARD    43   // Left spout solenoid
-#define PIN_RIGHT_REWARD   42   // Right spout solenoid
-#define PIN_LED_CUE        39   // Cue LED - Tells subject it is time to respond
-#define PIN_HOUSE_LAMP     38   // House light
+#define PIN_SPEAKER        A21   	// Speaker Pin            (DUE =  2)  (MEGA =  8)  (UNO =  9) (TEENSY = 5)	(TEENSY3.4 5)
+#define PIN_NOISE          30   	// Noise Pin              (DUE =  3)  (MEGA =  9)  (UNO = 10) (TEENSY = 6)	(TEENSY3.4 6)
+#define PIN_LEFT_REWARD    36   // Left spout solenoid
+#define PIN_RIGHT_REWARD   35   // Right spout solenoid
+#define PIN_LED_CUE        34   // Cue LED - Tells subject it is time to respond
+#define PIN_HOUSE_LAMP     33   // House light
 // Digital IN
-#define PIN_LEFT_LICK      53    // Left lick sensor
-#define PIN_RIGHT_LICK     52    // Right lick sensor
+#define PIN_LEFT_LICK      30    // Left lick sensor
+#define PIN_RIGHT_LICK     32    // Right lick sensor
 /*****************************************************
 Enums - DEFINE States
 *****************************************************/
@@ -287,7 +287,7 @@ static const char *_resultCodeNames[] =
                 "CODE_MISS",
                 "CODE_CORRECT_REJECT",
                 "CODE_FALSE_ALARM",
-                "NO_RESPONSE"
+                "CODE_NO_RESPONSE"
         };
 
 
@@ -315,6 +315,8 @@ enum ParamID
     REWARD_DURATION_MS,             // Reward duration in ms
     WHITE_NOISE_DURATION_MS,        // Time of the white noise cue
     S2_DURATION_MS,                 // Time of S2 being on
+    SNR_PERCENT,                    // Signal to noise ratio
+    SNR_STEP,                       // Signal to noise ratio step size
     RESPONSE_WINDOW_MS,             // How long animal has to decide
     ITI_DURATION_MS,                // How long is ITI state
     PENALTY_DURATION_MS,            // How long is the penalty state
@@ -335,6 +337,8 @@ static const char *_paramNames[] =
                 "REWARD_DURATION_MS",
                 "WHITE_NOISE_DURATION_MS",
                 "S2_DURATION_MS",
+                "SNR_PERCENT",
+                "SNR_STEP",
                 "RESPONSE_WINDOW_MS",
                 "ITI_DURATION_MS",
                 "PENALTY_DURATION_MS",
@@ -347,17 +351,19 @@ int _params[_NUM_PARAMS] =
         {
                 0,                              // _DEBUG
                 0,                              // CALIBRATION
-                50,								 // PERCENT_S2
+                50,								// PERCENT_S2
                 1,                              // S2_SPOUT
                 2,                              // NOISE_SPOUT
                 40,                             // REWARD_DURATION_MS
                 3000,							// WHITE_NOISE_DURATION_MS
                 250,                            // S2_DURATION_MS
+                50,                             // SNR_PERCENT
+                5,                              // SNR_STEP
                 3000,                           // RESPONSE_WINDOW_MS
                 5000,                           // ITI_DURATION_MS
                 5000,                           // PENALTY_DURATION_MS
                 50, 						    // TIME_NOISE_START
-                6                              // MOVING_AVG_WINDOW
+                6                               // MOVING_AVG_WINDOW
         };
 
 /*****************************************************
@@ -420,6 +426,7 @@ static long _recentMissRate          = 0;        // Tracks the miss rate over th
 static long _recentCorrectRejectRate = 0;        // Tracks the correct reject rate over the last 6 trials
 static long _recentFalseAlarmRate    = 0;        // Tracks the false alarm rate over the last 6 trials
 static long _recentNoResponseRate    = 0;        // Tracks the no response rate over the last 6 trials
+static long _lastSNR                 = 50;        // Tracks the last SNR used
 static State _recentOutcomes[6]; // Tracks the outcomes of the last 6 trials
 
 static bool _leftLick         = false;    // True when left lick detected, False when no lick
@@ -596,7 +603,6 @@ void mySetup()
     _stimulus_timer          = 0;        // Tracks time cue has been displayed for
     _reward_timer            = 0;        // Tracks time in reward state
 
-
     // Tell PC that we're running by sending '~' message:
     hostInit();                         // Sends all parameters, states and error codes to Matlab (LF Function)
 }
@@ -676,25 +682,29 @@ void init_trial() {
         ACTION LIST -- initialize the new state
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
     if (_state != _prevState) {                             // If ENTERING INIT_TRIAL STATE:
+        hostInit();
         _prevState = _state;                                // Assign _prevState to INIT_TRIAL _state
         sendMessage("$" + String(_state));                  // Send  HOST _state entry -- $2 (INIT_TRIAL State)
         // Send event marker (house_lamp_off) to HOST with timestamp
         sendMessage("&" + String(EVENT_TRIAL_INIT) + " " + String(signedMillis() - _exp_timer));
         _timer_init_trial = signedMillis();                     // Start _random_delay_timer
-        if (_params[_DEBUG]) {sendMessage("Trial Started.)");}
+        if (_params[_DEBUG]) {sendMessage("Trial Started.");}
         _num_trials++; // increment trial counter
-
         // Do the initial business of the state -- something you only want to do once when you enter
         // choose whether trial will be S2 or noise
         _dice_roll = random(1,100);
         if (_dice_roll <= _params[PERCENT_S2]) {
             _is_S2 = true;
+            // if debug, send message to host that trial will be tone trial and include the value of _dice_roll
+            if (_params[_DEBUG]) {
+                sendMessage("Trial will be S2. Dice roll: " + String(_dice_roll));
+            }
         } else {
             _is_S2 = false;
-        }
-        // if in calibration mode, force trial to be S2
-        if (_params[CALIBRATION]) {
-            _is_S2 = true;
+            // if debug, send message to host that trial will be noise trial and include the value of _dice_roll
+            if (_params[_DEBUG]) {
+                sendMessage("Trial will be noise. Dice roll: " + String(_dice_roll));
+            }
         }
         // if trial will be S2, choose when S2 will play
         if (_is_S2) {
@@ -741,8 +751,8 @@ void noise_trial() {
         // Send event marker (house_lamp_off) to HOST with timestamp
         sendMessage("&" + String(EVENT_NOISE_TRIAL) + " " + String(signedMillis() - _exp_timer));
         _timer_noise_trial = signedMillis();                     // mark time when state was entered
-        if (_params[_DEBUG]) {sendMessage("Noise Trial Started.)");}
-
+        if (_params[_DEBUG]) {sendMessage("Noise Trial Started.");}
+        _playTone = false; // ensure tone won't play
         // Do the initial business of the state -- something you only want to do once when you enter
 
 
@@ -760,16 +770,12 @@ void noise_trial() {
     long time_elapsed = signedMillis() - _timer_noise_trial;
     bool isWithinNoiseWindow = (time_elapsed >= _params[TIME_NOISE_START]) && (time_elapsed <= (_params[TIME_NOISE_START] + _params[WHITE_NOISE_DURATION_MS]));		// boolean to denote whether it is time to play the noise
     if (isWithinNoiseWindow) {
-        setNOISE(true); // play noise
-    }
-    else {
-        setNOISE(false); // turn off noise
+        playSound(true,false); // play noise alone
     }
 
     // define condition for leaving this state
     if (time_elapsed >= (_params[TIME_NOISE_START] + _params[WHITE_NOISE_DURATION_MS])) {// noise_trial time allotted has elapsed -> response window
         if (_params[_DEBUG]) {sendMessage("white noise trial successfully completed.");}
-        setNOISE(false);								  // turn off white noise if still playing
         _state = RESPONSE_WINDOW;                         // Move to RESPONSE_WINDOW state
         return;                                           // Exit Fx
     }
@@ -807,25 +813,20 @@ void cue_trial() {
     // check if time has reached noise start, if so play noise until end of state time out
     long time_elapsed = signedMillis() - _timer_cue_trial;
     bool isWithinNoiseWindow = (time_elapsed >= _params[TIME_NOISE_START]) && (time_elapsed <= (_params[TIME_NOISE_START] + _params[WHITE_NOISE_DURATION_MS]));		// boolean to denote whether it is time to play the noise
-    bool isWithinS2Window = abs(time_elapsed - _time_S2_start) <= 5;		// boolean to denote whether it is time to play S2
+    bool isWithinS2Window = (time_elapsed >= _time_S2_start) && (time_elapsed <= (_time_S2_start + _params[S2_DURATION_MS]));		// boolean to denote whether it is time to play the tone (S2
 
-    if (isWithinNoiseWindow) {
-        setNOISE(true); // play noise
-    }
-    else {
-        setNOISE(false); // turn off noise
-    }
-    
-    if(isWithinS2Window) { // if it is within time window to play cue
-        playSound(TONE_S2); // hopefully this doesn't accidentally extend the tone sound by executing the tone function all the way through the last possible time, this needs to be tested
-        // if debug send message saying tone played
-        if (_params[_DEBUG]) {sendMessage("S2 tone played.");}
+    if (isWithinNoiseWindow) { // if it is within time window to play noise
+        if(isWithinS2Window) { // if it is within time window to play S2
+            playSound(true,true); // play tone and noise
+        }
+        else {
+            playSound(true,false); // play noise alone
+        }
     }
 
     // define condition for leaving this state
     if (time_elapsed >= (_params[TIME_NOISE_START] + _params[WHITE_NOISE_DURATION_MS])) { // cue_trial time allotted has elapsed -> response window
         if (_params[_DEBUG]) {sendMessage("cue trial successfully completed.");}
-        setNOISE(false);								  // turn off white noise
         _state = RESPONSE_WINDOW;                         // Move to RESPONSE_WINDOW state
         return;                                           // Exit Fx
     }
@@ -932,10 +933,7 @@ void hit() {
         sendMessage("&" + String(EVENT_HIT) + " " + String(signedMillis() - _exp_timer));
         _timer_hit = signedMillis();                     // mark time when state was entered
         if (_params[_DEBUG]) {sendMessage("mouse hit.)");}
-
         setCueLED(false); // turn off cue LED
-
-        // Do the initial business of the state -- something you only want to do once when you enter
         giveReward(_params[S2_SPOUT]); // dispense juice on the tone spout
         // send event with timestamp to host that reward was given on tone spout, accounting for if tone spout is the right or left
         if (_params[S2_SPOUT] == 1) {
@@ -945,6 +943,11 @@ void hit() {
             sendMessage("&" + String(EVENT_REWARD_RIGHT) + " " + String(signedMillis() - _exp_timer));
         }
         sendMessage("reward dispensed on tone spout"); // send message to host
+        // if calibration mode is on, decrement SNR_PERCENT by SNR_STEP
+        if (_params[CALIBRATION]) {
+            _params[SNR_PERCENT] -= _params[SNR_STEP];
+            if (_params[SNR_PERCENT] < 0) {_params[SNR_PERCENT] = 0;}
+        }
     }
     /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       TRANSITION LIST -- checks conditions, moves to next state
@@ -973,7 +976,11 @@ void miss() {
 
         setCueLED(false); // turn off cue LED
         
-        // Do the initial business of the state -- something you only want to do once when you enter
+        // if calibration mode is on, increment SNR_PERCENT by SNR_STEP
+        if (_params[CALIBRATION]) {
+            _params[SNR_PERCENT] += _params[SNR_STEP];
+            if (_params[SNR_PERCENT] > 100) {_params[SNR_PERCENT] = 100;}
+        }
     }
     /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       TRANSITION LIST -- checks conditions, moves to next state
@@ -991,9 +998,9 @@ void false_alarm() {
     /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         ACTION LIST -- update false alarm rate
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
-    if (_state != _prevState) {                          // If ENTERING FALSE_ALARM STATE:
+    if (_state != _prevState) {                         // If ENTERING FALSE_ALARM STATE:
         _prevState = _state;                            // Assign _prevState to FALSE_ALARM _state
-        _resultCode = CODE_FALSE_ALARM;                         // Set _resultCode to CODE_FALSE_ALARM
+        _resultCode = CODE_FALSE_ALARM;                 // Set _resultCode to CODE_FALSE_ALARM
         sendMessage("$" + String(_state));              // Send  HOST _state entry -- $2 (CUE_TRIAL State)
         // Send event marker (house_lamp_off) to HOST with timestamp
         sendMessage("&" + String(EVENT_FALSE_ALARM) + " " + String(signedMillis() - _exp_timer));
@@ -1364,7 +1371,7 @@ void no_response() {
 /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 	GET LICK STATE (True/False - Boolean)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
-    bool getLickState() {
+    void getLickState() {
         if (digitalRead(PIN_LEFT_LICK) == HIGH) {_leftLick = true;} else {_leftLick = false;} // update left lick global variable
         if (digitalRead(PIN_RIGHT_LICK) == HIGH) {_rightLick = true;} else {_rightLick = false;} // update right lick global variable
     } // end Get Lick State---------------------------------------------------------------------------------------------------------------------
@@ -1372,31 +1379,14 @@ void no_response() {
 /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 	PLAY SOUND (Choose event from Enum list and input the frequency for that event)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
-    void playSound(SoundEventFrequencyEnum soundEventFrequency) {
-
-        if (soundEventFrequency == TONE_S2) {          // MOUSE: Cue Tone
-            tone(PIN_SPEAKER, TONE_S2, _params[S2_DURATION_MS]); // play tone at frequency of S2 for duration of S2
-            return;                                           // Exit Fx
-        }
+    void playSound(bool playNoise, bool playTone) {
+        float SNR = _params[SNR_PERCENT] / 100.0; // get the SNR value from the parameter list
+        float noiseVal = playNoise * (1 - SNR) * random(0, 255); // random value between 0 and 4095 to create white noise
+        float toneVal = playTone * SNR * 127.0 * sin(2.0 * 3.14159 * TONE_S2 * (micros()) / 1000000.0) + 127.0; // calculate the value of the tone
+        int audioVal = (int)noiseVal + (int)toneVal; // calculate the value of the audio signal
+        analogWrite(PIN_SPEAKER, audioVal); // output the audio signal to the speaker
 
     } // end Play Sound---------------------------------------------------------------------------------------------------------------------
-
-/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-	PLAY NOISE (turn noise on or off)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
-    void setNOISE(bool turnOn) { //stand in using an LED to represent noise
-        if (turnOn) {
-            digitalWrite(PIN_NOISE, HIGH);
-        }
-        else {
-            digitalWrite(PIN_NOISE, LOW);
-        }
-    } // end Play Noise---------------------------------------------------------------------------------------------------------------------
-
-
-
-
-
 
 /*****************************************************
 	SERIAL COMMUNICATION TO HOST
