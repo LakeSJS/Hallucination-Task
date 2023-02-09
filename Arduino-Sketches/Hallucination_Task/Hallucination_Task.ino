@@ -315,7 +315,7 @@ enum ParamID
     REWARD_DURATION_MS,             // Reward duration in ms
     WHITE_NOISE_DURATION_MS,        // Time of the white noise cue
     S2_DURATION_MS,                 // Time of S2 being on
-    SNR_PERCENT,                    // Signal to noise ratio
+    SNR_PERMILLE,                    // Signal to noise ratio
     SNR_STEP,                       // Signal to noise ratio step size
     RESPONSE_WINDOW_MS,             // How long animal has to decide
     ITI_DURATION_MS,                // How long is ITI state
@@ -337,7 +337,7 @@ static const char *_paramNames[] =
                 "REWARD_DURATION_MS",
                 "WHITE_NOISE_DURATION_MS",
                 "S2_DURATION_MS",
-                "SNR_PERCENT",
+                "SNR_PERMILLE",
                 "SNR_STEP",
                 "RESPONSE_WINDOW_MS",
                 "ITI_DURATION_MS",
@@ -357,8 +357,8 @@ int _params[_NUM_PARAMS] =
                 40,                             // REWARD_DURATION_MS
                 3000,							// WHITE_NOISE_DURATION_MS
                 250,                            // S2_DURATION_MS
-                50,                             // SNR_PERCENT
-                5,                              // SNR_STEP
+                500,                             // SNR_PERMILLE
+                50,                              // SNR_STEP
                 3000,                           // RESPONSE_WINDOW_MS
                 5000,                           // ITI_DURATION_MS
                 5000,                           // PENALTY_DURATION_MS
@@ -682,6 +682,16 @@ void init_trial() {
         ACTION LIST -- initialize the new state
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
     if (_state != _prevState) {                             // If ENTERING INIT_TRIAL STATE:
+        // set SNR step size to 50 if there have been fewer than 25 trials, 10 if there have been between 25 and 50 trials, 5 if there have been between 50 and 75 trials, and 1 if there have been over 75 trials
+        if (_num_trials < 25) {
+            _params[SNR_STEP] = 50;
+        } else if (_num_trials < 50) {
+            _params[SNR_STEP] = 10;
+        } else if (_num_trials < 75) {
+            _params[SNR_STEP] = 5;
+        } else {
+            _params[SNR_STEP] = 1;
+        }
         hostInit();
         _prevState = _state;                                // Assign _prevState to INIT_TRIAL _state
         sendMessage("$" + String(_state));                  // Send  HOST _state entry -- $2 (INIT_TRIAL State)
@@ -942,10 +952,10 @@ void hit() {
             sendMessage("&" + String(EVENT_REWARD_RIGHT) + " " + String(signedMillis() - _exp_timer));
         }
         sendMessage("reward dispensed on tone spout"); // send message to host
-        // if calibration mode is on, decrement SNR_PERCENT by SNR_STEP
+        // if calibration mode is on, decrement SNR_PERMILLE by SNR_STEP
         if (_params[CALIBRATION]) {
-            _params[SNR_PERCENT] -= _params[SNR_STEP];
-            if (_params[SNR_PERCENT] < 0) {_params[SNR_PERCENT] = 0;}
+            _params[SNR_PERMILLE] -= _params[SNR_STEP];
+            if (_params[SNR_PERMILLE] < 0) {_params[SNR_PERMILLE] = 0;}
         }
     }
     /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -975,10 +985,10 @@ void miss() {
 
         setCueLED(false); // turn off cue LED
         
-        // if calibration mode is on, increment SNR_PERCENT by SNR_STEP
+        // if calibration mode is on, increment SNR_PERMILLE by SNR_STEP
         if (_params[CALIBRATION]) {
-            _params[SNR_PERCENT] += _params[SNR_STEP];
-            if (_params[SNR_PERCENT] > 100) {_params[SNR_PERCENT] = 100;}
+            _params[SNR_PERMILLE] += _params[SNR_STEP];
+            if (_params[SNR_PERMILLE] > 1000) {_params[SNR_PERMILLE] = 1000;}
         }
     }
     /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1379,7 +1389,7 @@ void no_response() {
 	PLAY SOUND (Choose event from Enum list and input the frequency for that event)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
     void playSound(bool playNoise, bool playTone) {
-        float SNR = _params[SNR_PERCENT] / 100.0; // get the SNR value from the parameter list
+        float SNR = _params[SNR_PERMILLE] / 1000.0; // get the SNR value from the parameter list
         float noiseVal = playNoise * (1 - SNR) * random(0, 255); // random value between 0 and 4095 to create white noise
         float toneVal = playTone * SNR * 127.0 * sin(2.0 * 3.14159 * TONE_S2 * (micros()) / 1000000.0) + 127.0; // calculate the value of the tone
         int audioVal = (int)noiseVal + (int)toneVal; // calculate the value of the audio signal
