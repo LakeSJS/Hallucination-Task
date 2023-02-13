@@ -305,15 +305,17 @@ enum ParamID
 {
     _DEBUG,                  // (Private) 1 to enable debug messages from HOST. Default 0.
     CALIBRATION,             // 1 to enable calibration mode, which finds x50 by staircase
-    RANDOM_SNR,              // 1 to randomly determine SNR for each trial
+    RANDOM_SAMPLING,         // 1 to randomly determine S2 volume for each trial
     PERCENT_S2,              // percent of trials where S2 should be present
     S2_SPOUT,                // 1 if the Left side is S2 spout, 2 if right side is S2 spout
     NOISE_SPOUT,             // 1 if the Left side is noise spout, 2 if right side is noise spout
     REWARD_DURATION_MS,      // Reward duration in ms
     WHITE_NOISE_DURATION_MS, // Time of the white noise cue
     S2_DURATION_MS,          // Time of S2 being on
-    SNR_PERMILLE,            // Signal to noise ratio
-    SNR_STEP,                // Signal to noise ratio step size
+    S2VOL_PERMILLE,          // S2 volume in permille, will cause clipping if above 500
+    S2_STEP,                 // S2 volume step size
+    VOL_MIN,                 // Minimum volume of S2
+    VOL_MAX,                 // Maximum volume of S2
     RESPONSE_WINDOW_MS,      // How long animal has to decide
     ITI_DURATION_MS,         // How long is ITI state
     PENALTY_DURATION_MS,     // How long is the penalty state
@@ -328,15 +330,17 @@ static const char *_paramNames[] =
     {
         "_DEBUG",
         "CALIBRATION",
-        "RANDOM_SNR",
+        "RANDOM_SAMPLING",
         "PERCENT_S2",
         "S2_SPOUT",
         "NOISE_SPOUT",
         "REWARD_DURATION_MS",
         "WHITE_NOISE_DURATION_MS",
         "S2_DURATION_MS",
-        "SNR_PERMILLE",
-        "SNR_STEP",
+        "S2VOL_PERMILLE",
+        "S2_STEP",
+        "VOL_MIN",
+        "VOL_MAX",
         "RESPONSE_WINDOW_MS",
         "ITI_DURATION_MS",
         "PENALTY_DURATION_MS",
@@ -348,15 +352,17 @@ int _params[_NUM_PARAMS] =
     {
         0,    // _DEBUG
         0,    // CALIBRATION
-        0,    // RANDOM_SNR
+        0,    // RANDOM_SAMPLING
         50,   // PERCENT_S2
         1,    // S2_SPOUT
         2,    // NOISE_SPOUT
         40,   // REWARD_DURATION_MS
         3000, // WHITE_NOISE_DURATION_MS
         250,  // S2_DURATION_MS
-        500,  // SNR_PERMILLE
-        50,   // SNR_STEP
+        500,  // S2VOL_PERMILLE
+        50,   // S2_STEP
+        0,    // VOL_MIN
+        500, // VOL_MAX
         3000, // RESPONSE_WINDOW_MS
         2000, // ITI_DURATION_MS
         5000, // PENALTY_DURATION_MS
@@ -417,16 +423,12 @@ static long _percent_correct_reject = 0; // Tracks percent of trials that the an
 static long _percent_false_alarm = 0;    // Tracks percent of trials that the animal had a false alarm
 static long _percent_no_response = 0;    // Tracks percent of trials that the animal did not respond in time
 
-static std::vector<int> _S2outcomes; // 1 = hit, 0 = miss
-static std::vector<double> _S2SNRs; // 1000 = hit, 0 = miss
-
 // moving average trackers for animal performance
 static long _recentHitRate = 0;           // Tracks the hit rate over the last 6 trials
 static long _recentMissRate = 0;          // Tracks the miss rate over the last 6 trials
 static long _recentCorrectRejectRate = 0; // Tracks the correct reject rate over the last 6 trials
 static long _recentFalseAlarmRate = 0;    // Tracks the false alarm rate over the last 6 trials
 static long _recentNoResponseRate = 0;    // Tracks the no response rate over the last 6 trials
-static long _lastSNR = 50;                // Tracks the last SNR used
 static State _recentOutcomes[6];          // Tracks the outcomes of the last 6 trials
 
 static bool _leftLick = false;       // True when left lick detected, False when no lick
@@ -635,7 +637,6 @@ void mySetup()
      _recentCorrectRejectRate = 0; // Tracks the correct reject rate over the last 6 trials
      _recentFalseAlarmRate = 0;    // Tracks the false alarm rate over the last 6 trials
      _recentNoResponseRate = 0;    // Tracks the no response rate over the last 6 trials
-     _lastSNR = 50;                // Tracks the last SNR used
     
     // lick trackers
 
@@ -732,7 +733,7 @@ void init_trial()
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
     if (_state != _prevState)
     { // If ENTERING INIT_TRIAL STATE:
-        hostInit(); // this will get parameters from matlab, if calibration mode is on, SNR_PERMILLE will be updated
+        hostInit(); // this will get parameters from matlab, if calibration mode is on, S2VOL_PERMILLE will be updated
         _prevState = _state;               // Assign _prevState to INIT_TRIAL _state
         sendMessage("$" + String(_state)); // Send  HOST _state entry -- $2 (INIT_TRIAL State)
         // Send event marker (house_lamp_off) to HOST with timestamp
@@ -1061,22 +1062,7 @@ void hit()
             sendMessage("&" + String(EVENT_REWARD_RIGHT) + " " + String(signedMillis() - _exp_timer));
         }
         sendMessage("reward dispensed on tone spout"); // send message to host
-        // if calibration mode is on, decrement SNR_PERMILLE by SNR_STEP
-        if (_params[CALIBRATION])
-        {
-            //_S2outcomes.push_back(1); // add 1 to S2 outcomes vector
-            //_S2SNRs.push_back(_params[SNR_PERMILLE]); // add SNR to S2 SNR vector
-            //_params[SNR_PERMILLE] = (long)logistic_regression(_S2SNRs, _S2outcomes, 10000);
-            //_params[SNR_PERMILLE] -= _params[SNR_STEP];
-            if (_params[SNR_PERMILLE] < 0)
-            {
-                _params[SNR_PERMILLE] = 0;
-            }
-            if (_params[SNR_PERMILLE] > 1000)
-            {
-                _params[SNR_PERMILLE] = 1000;
-            }
-        }
+        // if calibration mode is on, decrement S2VOL_PERMILLE by S2_STEP
     }
     /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       TRANSITION LIST -- checks conditions, moves to next state
@@ -1112,23 +1098,6 @@ void miss()
         }
 
         setCueLED(false); // turn off cue LED
-
-        // if calibration mode is on, increment SNR_PERMILLE by SNR_STEP
-        if (_params[CALIBRATION])
-        {
-            //_S2outcomes.push_back(0); // add 0 to S2 outcomes vector
-            //_S2SNRs.push_back((double)_params[SNR_PERMILLE]); // add SNR to S2 SNR vector
-            //_params[SNR_PERMILLE] = (long)logistic_regression(_S2SNRs, _S2outcomes, 10000);
-            //_params[SNR_PERMILLE] += _params[SNR_STEP];
-            if (_params[SNR_PERMILLE] > 1000)
-            {
-                _params[SNR_PERMILLE] = 1000;
-            }
-            if (_params[SNR_PERMILLE] < 0)
-            {
-                _params[SNR_PERMILLE] = 0;
-            }
-        }
     }
     /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
       TRANSITION LIST -- checks conditions, moves to next state
@@ -1294,14 +1263,15 @@ void intertrial()
         _leftLick = false;
         _rightLick = false;
 
-        // if RANDOM_SNR is true, choose SNR for upcoming trial
-        if (_params[RANDOM_SNR]) {
-            _params[SNR_PERMILLE] = random(1, 450); // choose random SNR between 1 and 1000
-            // if debug, send message to host that SNR for this trial is SNR_PERMILLE
+        // if RANDOM_SAMPLING is true, choose S2VOL for upcoming trial by randomly deciding S2VOL_PERMILLE as a multiple of S2_STEP between VOL_MIN and VOL_MAX
+        if (_params[RANDOM_SAMPLING]) {
+            _params[S2VOL_PERMILLE] = random(_params[VOL_MIN]/_params[S2_STEP], _params[VOL_MAX]/_params[S2_STEP])*_params[S2_STEP]; // choose random S2VOL between VOL_MIN and VOL_MAX, in increments of S2_STEP
+            // if debug, send message to host that S2 volume for this trial is S2VOL_PERMILLE
             if (_params[_DEBUG]) {
-                sendMessage("SNR for this trial is " + String(_params[SNR_PERMILLE]));
+                sendMessage("S2 volume for this trial is " + String(_params[S2VOL_PERMILLE]));
             }
         }
+
         //=================== INIT HOST COMMUNICATION=================//
         isParamsUpdateStarted = false; // Initialize HOST param message monitor Start
         isParamsUpdateDone = false;    // Initialize HOST param message monitor End
@@ -1619,9 +1589,11 @@ void getLickState()
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
 void playSound(bool playNoise, bool playTone)
 {
-    float SNR = _params[SNR_PERMILLE] / 1000.0;                                                             // get the SNR value from the parameter list
-    float noiseVal = playNoise * (1 - SNR) * random(0, 255);                                                // random value between 0 and 4095 to create white noise
-    float toneVal = playTone * SNR * 127.0 * sin(2.0 * 3.14159 * TONE_S2 * (micros()) / 1000000.0) + 127.0; // calculate the value of the tone
+    float S2Volume = _params[S2VOL_PERMILLE] / 1000.0;                                                             // get the S2Volume value from the parameter list
+    // float noiseVal = playNoise * (1 - S2Volume) * random(0, 255); 
+    float noiseVal = playNoise * 0.5 * random(0, 255);
+    float toneVal = playTone * S2Volume * 127.5 * sin(2.0 * 3.14159 * TONE_S2 * (micros()) / 1000000.0) + 127.0; // calculate the value of the tone
+    
     int audioVal = (int)noiseVal + (int)toneVal;                                                            // calculate the value of the audio signal
     analogWrite(PIN_SPEAKER, audioVal);                                                                     // output the audio signal to the speaker
 

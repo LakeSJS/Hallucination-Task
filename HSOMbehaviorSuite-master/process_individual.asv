@@ -10,13 +10,14 @@ figure
 plot(SNR)
 xlabel('trial #')
 ylabel('SNR')
-%% Obtain psychometric curve from proportion within condition
-SNRlevels = unique(SNR);
-for SNRno = 1:length(SNRlevels)
-    numHits = sum((SNR == SNRlevels(SNRno)) .* (Code == 1));
-    hitRate(SNRno) = numHits / sum(SNR == SNRlevels(SNRno));
-end
-figure
+% %% Obtain psychometric curve from proportion within condition
+% SNRlevels = unique(SNR);
+% for SNRno = 1:length(SNRlevels)
+%     numHits = sum((SNR == SNRlevels(SNRno)) .* (Code == 1));
+%     hitRate(SNRno) = numHits / sum(SNR == SNRlevels(SNRno));
+% end
+% figure
+% plot(SNRlevels,hitRate)
 %% Obtain psychometric curve from binary logistic regression
 hitInds = find(Code == 1); missInds = find(Code == 2);
 correctRejectInds = find(Code == 3); falsePositiveInds = find(Code == 4);
